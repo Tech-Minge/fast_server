@@ -1,5 +1,0 @@
-/home/ubuntu/my_server/build/CMakeFiles/edit_cache.dir
-/home/ubuntu/my_server/build/CMakeFiles/rebuild_cache.dir
-/home/ubuntu/my_server/build/src/CMakeFiles/mymuduo.dir
-/home/ubuntu/my_server/build/src/CMakeFiles/edit_cache.dir
-/home/ubuntu/my_server/build/src/CMakeFiles/rebuild_cache.dir
