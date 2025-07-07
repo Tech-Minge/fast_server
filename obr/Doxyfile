@@ -1,0 +1,25 @@
+# 项目信息
+PROJECT_NAME           = "MyProject"
+PROJECT_BRIEF          = "C++项目示例"
+PROJECT_NUMBER         = 1.0
+
+# 输入源文件
+INPUT                  = .    # 源码目录
+RECURSIVE              = YES      # 递归扫描子目录
+FILE_PATTERNS          = *.cpp *.h *.hpp  # 处理的文件类型[4,7](@ref)
+
+# 输出设置
+OUTPUT_DIRECTORY       = .   # 文档输出目录
+GENERATE_HTML          = YES      # 生成HTML
+GENERATE_LATEX         = NO       # 关闭LaTeX（可选）
+
+# 语言优化
+OPTIMIZE_OUTPUT_FOR_C  = YES      # 优化C++输出
+# OUTPUT_LANGUAGE        = Chinese  # 中文文档[4,6](@ref)
+
+# 图表生成（需Graphviz）
+HAVE_DOT               = YES      # 启用图表
+CALL_GRAPH             = YES      # 生成函数调用图
+CALLER_GRAPH           = YES      # 生成调用者关系图[5,8](@ref)
+
+EXCLUDE                = ./build ./install
