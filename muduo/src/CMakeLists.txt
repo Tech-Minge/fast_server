@@ -1,5 +1,8 @@
-# 定义了SRC_LIST变量，包含当前目录下所有的源文件
-aux_source_directory(. SRC_LIST)
+#获取当前目录下的所有源文件
+file(GLOB SRC_FILES ${CMAKE_CURRENT_SOURCE_DIR}/*.cc)
 
-# 编译动态库
-add_library(mymuduo SHARED ${SRC_LIST})
+#创建静态库或共享库
+add_library(muduo_core SHARED ${SRC_FILES})
+
+#设置头文件的路径
+target_include_directories(muduo_core PUBLIC ${CMAKE_SOURCE_DIR}/include)
