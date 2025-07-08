@@ -10,7 +10,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
-
+#include "reactor.hpp"
 #define DEFAULT_PORT    8080
 #define MAX_CONN        16
 #define MAX_EVENTS      32
@@ -24,8 +24,19 @@
 void server_run();
 void client_run();
 
+void reactor_run()
+{
+	const int NUM_THREADS = 4;
+ 
+    // 启动主线程监听
+    MainReactor main_reactor(8080, NUM_THREADS);
+    main_reactor.run();
+
+}
+
 int main(int argc, char *argv[])
 {
+	
 	int opt;
 	char role = 's';
 	while ((opt = getopt(argc, argv, "cs")) != -1) {
@@ -41,7 +52,8 @@ int main(int argc, char *argv[])
 		}
 	}
 	if (role == 's') {
-		server_run();
+		// server_run();
+		reactor_run(); // 使用Reactor模式运行服务器
 	} else {
 		client_run();
 	}
