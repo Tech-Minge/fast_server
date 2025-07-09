@@ -4,13 +4,13 @@
 
 class FdWrapper {
 public:
-    FdWrapper(int fd, int events) : fd_(fd), events_(events) {}
+    FdWrapper(int fd, uint32_t events) : fd_(fd), events_(events) {}
     int fd() const { return fd_; }
     int events() const { return events_; }
     void setEvents(int events) { events_ = events; }
 private:
     int fd_;
-    int events_;
+    uint32_t events_;
 };
 
 class Epoll {
@@ -25,26 +25,14 @@ public:
     // void modifyFd(int fd, int events);
     // void removeFd(int fd);
 
-    int doEpoll(int timeoutMs, std::vector<FdWrapper>& fds) {
-        int numEvents = ::epoll_wait(epollFd_, &*events_.begin(), static_cast<int>(events_.size()), timeoutMs);
-        if (numEvents < 0) {
-            // Handle error
-        }
-        for (int i = 0; i < numEvents; ++i) {
-            fds.push_back({
-                events_[i].data.fd,
-                events_[i].events
-            });
-        }
-    }
+    int doEpoll(int timeoutMs, std::vector<FdWrapper>& fds);
 
-    void operateFd(FdWrapper fw, int operation) {
+    int operateFd(FdWrapper fw, int operation) {
         epoll_event event;
         event.data.fd = fw.fd();
         event.events = fw.events();
-        if (::epoll_ctl(epollFd_, operation, fw.fd(), &event) < 0) {
-            // Handle error
-        }
+        int ret = epoll_ctl(epollFd_, operation, fw.fd(), &event);
+        return ret;
     }
 
 private:

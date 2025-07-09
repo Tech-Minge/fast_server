@@ -1,0 +1,3 @@
+[submodule "muduo/third_party/spdlog"]
+	path = muduo/third_party/spdlog
+	url = https://gitclone.com/github.com/gabime/spdlog.git
