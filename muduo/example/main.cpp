@@ -9,18 +9,206 @@
 #include <sys/epoll.h>
 #include <errno.h>
 #include <stdio.h>
+#include <utility>
+#include <chrono>
 #include <stdlib.h>
+#include <optional>
 #include "TcpSpi.hpp"
 #include "TcpApi.hpp"
 
 
 #define DEFAULT_PORT    8080
 
-
-void server_run();
 void client_run();
 
+struct Request {
+	uint64_t timestamp;
+	std::string payload;
+};
 
+struct Response {
+	uint64_t timestamp;
+	std::string payload;
+};
+
+#pragma pack(push, 1)
+struct Data {
+	uint64_t id;
+	uint32_t cvl;
+	uint32_t cto;
+	uint32_t lpr;
+	uint32_t opx;
+	double cpx;
+	uint32_t cpx_len;
+	uint32_t opx_len;
+	int32_t bp[5];
+	int32_t ap[5];
+	int32_t bs[5];
+	int32_t as[5];
+};
+#pragma pack(pop)
+
+
+uint64_t getMicroTimestamp() {
+    auto now = std::chrono::system_clock::now();
+    auto duration = now.time_since_epoch();
+    return std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+}
+
+
+size_t encoder(uint8_t type, const char* data, uint32_t data_len, char* output, size_t out_size) {
+    if (out_size < 5 + data_len || !output)
+        return 0;
+
+    output[0] = static_cast<char>(type);
+	auto total_len = 5 + data_len;
+    std::memcpy(output + 1, &total_len, 4);
+
+    for (uint32_t i = 0; i < data_len; ++i) {
+        output[5 + i] = static_cast<char>(data[i] + (i % 2 ? 0x51 : 0x4A));
+    }
+    return total_len;
+}
+
+
+class Coder {
+public:
+	std::pair<uint8_t, int> getMessageTypeLength(const char * data) {
+		if (data == nullptr) {
+			std::abort();
+		}
+		uint8_t type = static_cast<uint8_t>(data[0]);
+		uint32_t len;
+		std::memcpy(&len, data + 1, 4);
+		return std::make_pair(type, len);
+	}
+
+	std::optional<Request> tryDecode(SimpleBuffer& buffer) {
+		if (buffer.size() < kHeaderLen) {
+			return {};
+		}
+		const char* data = buffer.data();
+		auto [type, messageLen] = getMessageTypeLength(data);
+		if (type != 2) {
+			std::printf("Unsupported message type: %d\n", type);
+			// close connection
+			return {};
+		}
+		if (messageLen < 0) {
+			printf("Invalid message length\n");
+		} else if (buffer.size() >= messageLen) {
+			buffer.advance(kHeaderLen);
+			printf("Received type: %d, length: %d\n", type, messageLen);
+			Request req = decode(buffer.data(), messageLen - kHeaderLen);
+			// printf("Decoded timestamp: %lu, payload: %s\n", req.timestamp, req.payload.c_str());
+			buffer.advance(messageLen - kHeaderLen);
+			return req;
+		} else {
+			printf("Not enough data for a complete message\n");
+			return {};
+		}
+	}
+
+	void encodeResponse(Response& response, std::vector<char>& output) {
+		output.resize(13 + response.payload.size());
+
+		output[0] = 3; // type
+		uint32_t total_len = 13 + response.payload.size();
+		std::memcpy(output.data() + 1, &total_len, 4); // total length
+		// std::memcpy(output + 1, &total_len, 4);
+		auto current_time = getMicroTimestamp();
+		// std::memcpy(output.data() + 5, &current_time, sizeof(current_time));
+		for (int i = 0; i < 8; ++i) {
+			output[5 + i] = static_cast<char>((current_time >> (i * 8)) + (i % 2 ? 0x51 : 0x4A));
+		}
+
+		for (size_t i = 0; i < response.payload.size(); ++i) {
+			output[13 + i] = static_cast<char>(response.payload[i] + (i % 2 ? 0x51 : 0x4A));
+		}
+	}
+
+	void encodeData(Data& data, std::vector<char>& output) {
+		output.resize(sizeof(Data) + 5);
+		output[0] = 1; // type
+		uint32_t total_len = sizeof(Data) + 5;
+		std::memcpy(output.data() + 1, &total_len, 4);
+		std::memcpy(output.data() + 5, &data, sizeof(Data));
+		for (size_t i = 0; i < sizeof(Data); ++i) {
+			output[i + 5] += 0; // i % 2 ? 0x51 : 0x4A;
+		}
+	}
+
+private:
+	Request decode(const char* data, size_t length) {
+		if (!data) 
+			return Request();
+		
+		Request request;
+
+		uint64_t decoded_timestamp = 0;
+		for (int i = 0; i < 8; ++i) {
+			uint8_t decoded_byte = data[i] -  (i % 2 ? 0x51 : 0x4A);
+			decoded_timestamp |= (static_cast<uint64_t>(decoded_byte) << (i * 8));
+		}
+		request.timestamp = decoded_timestamp;
+		
+		const size_t payload_length = length - 8;
+		request.payload.resize(payload_length);
+		
+		char* payload_ptr = &request.payload[0];
+		for (size_t i = 8; i < length; ++i) {
+			payload_ptr[i - 8] = data[i] -  (i % 2 ? 0x51 : 0x4A);
+		}
+		return request;
+	}
+private:
+	constexpr static size_t kHeaderLen = 5;
+};
+
+class CubeServer: public TcpSpi {
+public:
+	void onAccepted(std::shared_ptr<Connection> conn) override {
+	}
+
+	void onDisconnected(std::shared_ptr<Connection> conn, int reason, const char* reason_str) override {
+	}
+
+	void onMessage(std::shared_ptr<Connection> conn, const char* data, size_t len) override {
+		buffer_.write(data, len);
+		while (auto req = coder_.tryDecode(buffer_)) {
+			printf("Decoded timestamp: %lu, payload: %s\n", req->timestamp, req->payload.c_str());
+			Response response = generateEchoBackResponse(*req);
+			
+			// std::vector<char> response_buffer;
+			// coder_.encodeResponse(response, response_buffer);
+			// conn->send(response_buffer.data(), response_buffer.size());
+
+			std::vector<char> response_buffer;
+			Data data_to_send {
+				1,2,3,4,5,6,7,8,
+				{9, 10, 11, 12, 13},
+				{14, 15, 14, 13, 12},
+				{11, 10, 9, 8, 7},
+				{6, 5, 4, 3, 2},
+			};
+			coder_.encodeData(data_to_send, response_buffer);
+			conn->send(response_buffer.data(), response_buffer.size());
+		}
+	}
+private:
+	Response generateEchoBackResponse(const Request& req) {
+		Response response;
+		response.timestamp = getMicroTimestamp();
+		response.payload.resize(req.payload.size() + 8);
+		// write req time stamp and payload to response's payload
+		std::memcpy(response.payload.data(), &req.timestamp, sizeof(req.timestamp));
+		std::memcpy(response.payload.data() + 8, req.payload.data(), req.payload.size());
+		return response;
+	}
+private:
+	Coder coder_;
+	SimpleBuffer buffer_;
+};
 
 class EchoServer: public TcpSpi {
 public:
@@ -47,8 +235,8 @@ void reactor_run()
 {
 	TcpApi api;
 	api.bindAddress("127.0.0.1", DEFAULT_PORT);
-	EchoServer echo_server;
-	api.registerSpi(&echo_server);
+	CubeServer c;
+	api.registerSpi(&c);
 	api.run();
 }
 
@@ -70,7 +258,6 @@ int main(int argc, char *argv[])
 		}
 	}
 	if (role == 's') {
-		// server_run();
 		reactor_run(); // 使用Reactor模式运行服务器
 	} else {
 		client_run();
@@ -110,80 +297,6 @@ static int setnonblocking(int sockfd)
 }
 
 
-void server_run()
-{
-	int i;
-	int n;
-	int epfd;
-	int nfds;
-	int listen_sock;
-	int conn_sock;
-	socklen_t socklen;
-	char buf[256];
-	struct sockaddr_in srv_addr;
-	struct sockaddr_in cli_addr;
-	struct epoll_event events[16];
-
-	listen_sock = socket(AF_INET, SOCK_STREAM, 0);
-
-	set_sockaddr(&srv_addr, "127.0.0.1", DEFAULT_PORT);
-	bind(listen_sock, (struct sockaddr *)&srv_addr, sizeof(srv_addr));
-
-	setnonblocking(listen_sock);
-	listen(listen_sock, 16);
-
-	epfd = epoll_create(1);
-	epoll_ctl_add(epfd, listen_sock, EPOLLIN | EPOLLOUT | EPOLLET);
-
-	socklen = sizeof(cli_addr);
-	for (;;) {
-		nfds = epoll_wait(epfd, events, 16, -1);
-		for (i = 0; i < nfds; i++) {
-			if (events[i].data.fd == listen_sock) {
-				/* handle new connection */
-				conn_sock =
-				    accept(listen_sock,
-					   (struct sockaddr *)&cli_addr,
-					   &socklen);
-
-				inet_ntop(AF_INET, (char *)&(cli_addr.sin_addr),
-					  buf, sizeof(cli_addr));
-				printf("[+] connected with %s:%d\n", buf,
-				       ntohs(cli_addr.sin_port));
-
-				setnonblocking(conn_sock);
-				epoll_ctl_add(epfd, conn_sock,
-					      EPOLLIN | EPOLLET | EPOLLRDHUP |
-					      EPOLLHUP);
-			} else if (events[i].events & EPOLLIN) {
-				/* handle EPOLLIN event */
-				for (;;) {
-					bzero(buf, sizeof(buf));
-					n = read(events[i].data.fd, buf,
-						 sizeof(buf));
-					if (n <= 0 /* || errno == EAGAIN */ ) {
-						break;
-					} else {
-						printf("[+] data: %s\n", buf);
-						int n = write(events[i].data.fd, buf,
-						      strlen(buf));
-						printf("[+] write %d bytes\n", n);
-					}
-				}
-			} else {
-				printf("[+] unexpected\n");
-			}
-			/* check if the connection is closing */
-			if (events[i].events & (EPOLLRDHUP | EPOLLHUP)) {
-				printf("[+] connection closed\n");
-				epoll_ctl(epfd, EPOLL_CTL_DEL,
-					  events[i].data.fd, NULL);
-				close(events[i].data.fd);
-				continue;
-			}
-		}
-	}
-}
 
 /*
  * test clinet 
@@ -205,22 +318,36 @@ void client_run()
 	}
 	for (;;) {
 		printf("input: ");
-		fgets(buf, sizeof(buf), stdin);
-		c = strlen(buf) - 1;
-		buf[c] = '\0';
-		write(sockfd, buf, c + 1);
+		uint64_t t = getMicroTimestamp();
+		std::memcpy(buf, &t, sizeof(uint64_t));
+		char ch;
+		int num;
+		std::cin >> ch >> num;
+		for (int i = 0; i < num; ++i) {
+			buf[8 + i] = ch;
+		}
+		char out[1024];
+		auto n = encoder(2, buf, 8 + num, out, sizeof(out));
+		printf("send type: %d, len: %d\n", 2, n);
+		write(sockfd, out, n);
 
 		bzero(buf, sizeof(buf));
-		while (errno != EAGAIN
-		       && (n = read(sockfd, buf, sizeof(buf))) > 0) {
-			printf("echo %d: %s\n", n, buf);
-			bzero(buf, sizeof(buf));
-
-			c -= n;
-			if (c <= 0) {
-				break;
-			}
-		}
+		n = read(sockfd, buf, sizeof(buf));
+		printf("echo length %d\n", n);
+		
+		Data data = *reinterpret_cast<Data*>(buf + 5);
+		// print data struct
+		printf("id: %lu, cvl: %u, cto: %u, lpr: %u, opx: %u, cpx: %f, cpx_len: %u, opx_len: %u\n",
+			data.id, data.cvl, data.cto, data.lpr, data.opx, data.cpx, data.cpx_len, data.opx_len);
+		printf("bp: %d %d %d %d %d\n",
+			data.bp[0], data.bp[1], data.bp[2], data.bp[3], data.bp[4]);
+		printf("ap: %d %d %d %d %d\n",
+			data.ap[0], data.ap[1], data.ap[2], data.ap[3], data.ap[4]);
+		printf("bs: %d %d %d %d %d\n",
+			data.bs[0], data.bs[1], data.bs[2], data.bs[3], data.bs[4]);
+		printf("as: %d %d %d %d %d\n",
+			data.as[0], data.as[1], data.as[2], data.as[3], data.as[4]);
+		bzero(buf, sizeof(buf));
 	}
 	close(sockfd);
 }

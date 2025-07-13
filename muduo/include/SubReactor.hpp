@@ -5,7 +5,9 @@
 #include <memory>
 #include <unordered_map>
 #include "Connection.hpp"
-
+#include <functional>
+#include <chrono>
+#include <set>
 class SubReactor: public Reactor, public std::enable_shared_from_this<SubReactor> {
 public:
     using ConnectionPtr = std::shared_ptr<Connection>;
@@ -24,7 +26,11 @@ public:
     void disableSendEvent(FdWrapper& fdw);
     void disableReadEventAndShutdown(FdWrapper& fdw);
     void removeConnection(FdWrapper& fdw);
-     // 处理 pipe 通知
+
+    int64_t registerTimer(int64_t interval_ms, std::function<void()> callback, bool recurring = false);
+    bool cancelTimer(int64_t timer_id);
+    void handleTimerEvents();
+
     void handlePipe();
 
     // 处理新连接
@@ -35,10 +41,31 @@ public:
     void handleRead(FdWrapper& fdw);
 
     void handleWrite(FdWrapper fdw);
+
+
 private:
     int pipeFds_[2]; // pipe 用于通知新连接
     std::thread thread_;
     ConnectionMap connectionMap_; // 管理连接的映射
     std::queue<int> newConnections_;
     std::mutex queueMutex_;
+
+    int timer_fd_ = -1; // timerfd 文件描述符
+    std::atomic<int64_t> next_timer_id_{0}; // 定时器ID生成器
+
+
+    struct TimerInfo {
+        int64_t id;
+        int64_t interval_ms;
+        std::function<void()> callback;
+        bool recurring;
+        std::chrono::steady_clock::time_point expiration;
+        
+        bool operator<(const TimerInfo& other) const {
+            return expiration < other.expiration;
+        }
+    };
+
+    std::set<TimerInfo> timers_;
+    std::mutex timers_mutex_;
 };
