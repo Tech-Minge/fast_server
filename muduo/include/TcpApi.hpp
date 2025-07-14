@@ -6,8 +6,11 @@
 #include "TcpSpi.hpp"
 #include "MainReactor.hpp"
 #include "Signal.hpp"
+#include "spdlog/spdlog.h"
 class TcpApi {
 public:
+    TcpApi() {
+    }
     void bindAddress(const char* ip, int port) {
         mainReactor_.bindAddress(ip, port);
     }

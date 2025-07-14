@@ -1,7 +1,7 @@
 #include "SubReactor.hpp"
 #include "spdlog/spdlog.h"
 #include <sys/timerfd.h>
-
+#include "Utils.hpp"
 SubReactor::SubReactor() {
     // 创建 pipe 用于通知新连接
     if (pipe(pipeFds_) < 0) {
@@ -22,11 +22,13 @@ SubReactor::SubReactor() {
     }
     
     // 将 timerfd 添加到 epoll 监听
+    /*
     FdWrapper timer_fdw(timer_fd_);
     timer_fdw.setEventHandler([this](FdWrapper& fdw) {
         this->handleTimerEvents();
     });
     addFd(timer_fdw, EPOLLIN | EPOLLET); // 边缘触发模式
+    */
 }
 
 SubReactor::~SubReactor() {
@@ -76,21 +78,15 @@ void SubReactor::enqueueNewConnection(int fd) {
     }
 }
 
-void SubReactor::addSendEvent(FdWrapper& fdw) {
-    spdlog::info("add send event on fd={}", fdw.fd());
-    fdw.setEvents(fdw.events() | EPOLLOUT);
-    int ret = epoll_.operateFd(fdw, EPOLL_CTL_MOD);
-    if (ret < 0) {
-        spdlog::error("add send event error: {}", strerror(errno));
-    }
-}
-
-void SubReactor::disableSendEvent(FdWrapper& fdw) {
-    spdlog::info("disable send event on fd={}", fdw.fd());
-    fdw.setEvents(fdw.events() & ~EPOLLOUT);
-    int ret = epoll_.operateFd(fdw, EPOLL_CTL_MOD);
-    if (ret < 0) {
-        spdlog::error("disable send event error: {}", strerror(errno));
+void SubReactor::enqueueSend(int fd) {
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    sendQueue_.push(fd);
+    // spdlog::info("Enqueued send for fd={}", fd);
+    // 写入 pipe 通知
+    char ch = 1;
+    int n = write(pipeFds_[1], &ch, 1);
+    if (n < 0) {
+        spdlog::error("write pipe error: {}", strerror(errno));
     }
 }
 
@@ -120,19 +116,36 @@ void SubReactor::handlePipe() {
         spdlog::error("read pipe error: {}", strerror(errno));
     }
     processNewConnections();
+    processSendQueue();
+}
+
+void SubReactor::processSendQueue() {
+    std::lock_guard<std::mutex> lock(queueMutex_);
+    while (!sendQueue_.empty()) {
+        auto fd = sendQueue_.front();
+        sendQueue_.pop();
+        handleWrite(FdWrapper(fd, EPOLLOUT | EPOLLHUP | EPOLLET));
+    }
 }
 
 void SubReactor::processNewConnections() {
-    std::lock_guard<std::mutex> lock(queueMutex_);
+    ScopedTimer timer(__func__);
+    // std::lock_guard<std::mutex> lock(queueMutex_);
     while (!newConnections_.empty()) {
         auto fd = newConnections_.front();
-        FdWrapper fw(fd, EPOLLIN | EPOLLET);
-        addEpollFd(fw); // 将新连接的 fd 添加到 epoll 中
         newConnections_.pop();
-        auto conn = std::make_shared<Connection>(FdWrapper(fd, EPOLLIN | EPOLLET), this);
-        connectionMap_[fd] = conn; // 将连接添加到映射中
-        spi_->onAccepted(conn); // 通知 SPI 新连接已建立
-        spdlog::info("New connection accepted: fd={}", fd);
+        {
+            ScopedTimer timer("processNewConnections::addEpollFd");
+            // 添加到 epoll 监听
+            addEpollFd(FdWrapper(fd, EPOLLIN | EPOLLHUP | EPOLLET));
+        }
+        
+        {
+            ScopedTimer timer("processNewConnections::createConnection");
+        
+        connectionMap_[fd] = std::make_shared<Connection>(FdWrapper(fd, EPOLLIN | EPOLLHUP | EPOLLET), this);
+        spi_->onAccepted(connectionMap_[fd]);
+        }
     }
 }
 
@@ -155,16 +168,20 @@ void SubReactor::handleEvent(FdWrapper& fdw) {
 }
 
 void SubReactor::handleRead(FdWrapper& fdw) {
-    std::vector<char> buffer;
-    const size_t chunkSize = 4; // 每次读取的块大小
+    std::vector<char> buffer; // 初始缓冲区大小
+    const size_t chunkSize = 4096; // 每次读取的块大小
     ssize_t totalRead = 0;
     ssize_t n = 0;
+    ScopedTimer timer(__func__);
 
-    do {
-        buffer.resize(totalRead + chunkSize); // 动态扩容
-        n = read(fdw.fd(), buffer.data() + totalRead, chunkSize);
-        if (n > 0) totalRead += n;
-    } while (n > 0); // 持续读取直到无数据
+    {
+        ScopedTimer timer("handleRead::pure read");
+        do {
+            buffer.resize(totalRead + chunkSize); // 动态扩容
+            n = read(fdw.fd(), buffer.data() + totalRead, chunkSize);
+            if (n > 0) totalRead += n;
+        } while (n > 0); // 持续读取直到无数据
+    }
 
     // 处理读取结果
     if (totalRead <= 0) {
@@ -173,10 +190,11 @@ void SubReactor::handleRead(FdWrapper& fdw) {
         spi_->onDisconnected(connectionMap_[fdw.fd()], 1, "what can I say");
         removeConnection(fdw);
     } else {
-        spdlog::info("Received data: {}, len = {}", std::string(buffer.data(), totalRead), totalRead);
+        // spdlog::info("Received data len = {}", totalRead);
         // 传递完整数据给 SPI
         auto it = connectionMap_.find(fdw.fd());
         if (it != connectionMap_.end()) {
+            ScopedTimer timer("handleRead::onMessage");
             spi_->onMessage(it->second, buffer.data(), totalRead); // 通知 SPI 收到消息
         } else {
             spdlog::warn("No connection found for fd={}", fdw.fd());
@@ -187,28 +205,42 @@ void SubReactor::handleRead(FdWrapper& fdw) {
 void SubReactor::handleWrite(FdWrapper fdw) {
     auto conn = connectionMap_[fdw.fd()];
     if (conn->sendBuffer().noData()) {
-        spdlog::warn("No data to write on fd={}", conn->fdWrapper().fd());
+        spdlog::debug("No data to write on fd={}", conn->fdWrapper().fd());
         return;
     }
-    ssize_t n = write(conn->fdWrapper().fd(), conn->sendBuffer().data(), conn->sendBuffer().size());
-    if (n < 0) {
-        spdlog::error("Write error on fd={}: {}", conn->fdWrapper().fd(), strerror(errno));
-        spi_->onDisconnected(conn, 3, "write error");
-        removeConnection(conn->fdWrapper());
-    } else {
-        spdlog::info("Write response length: {}", n);
-        conn->sendBuffer().advance(n);
-        if (conn->sendBuffer().noData()) {
-            spdlog::info("No data to write on fd={}", conn->fdWrapper().fd());
-            disableSendEvent(conn->fdWrapper());
-            conn->checkNeedClose();
-        } else {
-            spdlog::info("Data to write on fd={}, left: {}", conn->fdWrapper().fd(), conn->sendBuffer().size());
+
+    ScopedTimer timer(__func__);
+
+    do {
+        auto writeChunkSize = std::min(conn->sendBuffer().size(), static_cast<size_t>(4096)); // 每次写入4096字节
+        ssize_t n;
+        {
+            ScopedTimer timer("handleWrite::pure write");
+            n = write(conn->fdWrapper().fd(), conn->sendBuffer().data(), writeChunkSize);
         }
-    }
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                // spdlog::debug("Write would block on fd={}", conn->fdWrapper().fd());
+                break; // 非阻塞模式下，退出循环
+            } else {
+                // spdlog::error("Write error on fd={}: {}", conn->fdWrapper().fd(), strerror(errno));
+                spi_->onDisconnected(conn, 3, "write error");
+                removeConnection(conn->fdWrapper());
+                return;
+            }
+        } else if (n == 0) {
+            // spdlog::warn("Write returned 0 on fd={}", conn->fdWrapper().fd());
+            break; // 连接可能已经关闭
+        } else {
+            // spdlog::debug("Wrote {} bytes to fd={}, remain size = {}", n, conn->fdWrapper().fd(), conn->sendBuffer().size());
+            conn->sendBuffer().advance(n); // 更新发送缓冲区
+        }
+    } while (conn->sendBuffer().size() > 0);
+
+    // spdlog::debug("Finished writing to fd={} | remain size = {}", conn->fdWrapper().fd(), conn->sendBuffer().size());
 }
 
-
+/*
 int64_t SubReactor::registerTimer(int64_t interval_ms, std::function<void()> callback, bool recurring) {
     if (interval_ms <= 0 || !callback) {
         return -1; // 无效参数
@@ -236,6 +268,7 @@ int64_t SubReactor::registerTimer(int64_t interval_ms, std::function<void()> cal
     return timer.id;
 }
 
+
 // 取消定时器
 bool SubReactor::cancelTimer(int64_t timer_id) {
     std::lock_guard<std::mutex> lock(timers_mutex_);
@@ -258,6 +291,7 @@ bool SubReactor::cancelTimer(int64_t timer_id) {
     
     return true;
 }
+
 
 // 处理定时器事件
 void SubReactor::handleTimerEvents() {
@@ -341,29 +375,31 @@ void SubReactor::updateNextTimer() {
         // 处理设置失败
     }
 }
+*/
 
 // 禁用定时器
-void SubReactor::disableTimer() {
-    struct itimerspec new_value = {};
-    timerfd_settime(timer_fd_, 0, &new_value, nullptr);
-}
+// void SubReactor::disableTimer() {
+//     struct itimerspec new_value = {};
+//     timerfd_settime(timer_fd_, 0, &new_value, nullptr);
+// }
+/*
 
 // 在事件处理中增加定时器处理
 void SubReactor::handleEvent(FdWrapper& fdw) {
-    if (fdw.getFd() == pipeFds_[0]) {
+    if (fdw.fd() == pipeFds_[0]) {
         handlePipe();
     } 
-    else if (fdw.getFd() == timer_fd_) {
-        handleTimerEvents();
-    }
-    else if (fdw.getEvents() & EPOLLIN) {
+    // else if (fdw.getFd() == timer_fd_) {
+    //     handleTimerEvents();
+    // }
+    else if (fdw.events() & EPOLLIN) {
         handleRead(fdw);
     }
-    else if (fdw.getEvents() & EPOLLOUT) {
+    else if (fdw.events() & EPOLLOUT) {
         handleWrite(fdw);
     }
 }
-
+*/
 
 /*
 int main() {

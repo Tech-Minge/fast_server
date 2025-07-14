@@ -11,12 +11,13 @@ Connection::Connection(FdWrapper fdWrapper, SubReactor* subReactor)
 }
 
 void Connection::send(const char* data, size_t len) {
+    ScopedTimer timer(__func__);
     if (tryClose_) {
         return;
     }
     // buffer into sendBuffer_
     sendBuffer_.write(data, len);
-    subReactor_->addSendEvent(fdWrapper_);
+    subReactor_->enqueueSend(fdWrapper_.fd());
 }
 
 void Connection::close(bool force) {

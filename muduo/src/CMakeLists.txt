@@ -8,7 +8,7 @@ target_include_directories(tcp PUBLIC
     ${PROJECT_SOURCE_DIR}/include
 )
 
-target_include_directories(tcp PRIVATE 
+target_include_directories(tcp PUBLIC 
     ${PROJECT_SOURCE_DIR}/third_party/spdlog/include
 )
 
@@ -22,3 +22,8 @@ install(TARGETS tcp
 )
 
 install(DIRECTORY  ${PROJECT_SOURCE_DIR}/include/ DESTINATION include)
+
+install(
+    DIRECTORY ${PROJECT_SOURCE_DIR}/third_party/spdlog/include/spdlog/
+    DESTINATION include/spdlog
+)

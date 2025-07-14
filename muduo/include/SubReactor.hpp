@@ -1,6 +1,6 @@
 #pragma once
 
-
+#include "spdlog/spdlog.h"
 #include "Reactor.hpp"
 #include <memory>
 #include <unordered_map>
@@ -22,8 +22,8 @@ public:
      // 将新连接加入队列
     void enqueueNewConnection(int fd);
 
-    void addSendEvent(FdWrapper& fdw);
-    void disableSendEvent(FdWrapper& fdw);
+    void enqueueSend(int fd);
+    
     void disableReadEventAndShutdown(FdWrapper& fdw);
     void removeConnection(FdWrapper& fdw);
 
@@ -32,6 +32,8 @@ public:
     void handleTimerEvents();
 
     void handlePipe();
+
+    void processSendQueue(); // 处理发送队列中的事件
 
     // 处理新连接
     void processNewConnections();
@@ -48,11 +50,11 @@ private:
     std::thread thread_;
     ConnectionMap connectionMap_; // 管理连接的映射
     std::queue<int> newConnections_;
+    std::queue<int> sendQueue_;
     std::mutex queueMutex_;
 
     int timer_fd_ = -1; // timerfd 文件描述符
     std::atomic<int64_t> next_timer_id_{0}; // 定时器ID生成器
-
 
     struct TimerInfo {
         int64_t id;

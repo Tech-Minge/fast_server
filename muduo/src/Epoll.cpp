@@ -3,7 +3,7 @@
 
 
 int Epoll::doEpoll(int timeoutMs, std::vector<FdWrapper>& fds) {
-    spdlog::info("Epoll::doEpoll called with timeout: {}", timeoutMs);
+    spdlog::debug("Epoll::doEpoll called with timeout: {}", timeoutMs);
     int numEvents = ::epoll_wait(epollFd_, &*events_.begin(), static_cast<int>(events_.size()), timeoutMs);
     if (numEvents < 0) {
         // Handle error

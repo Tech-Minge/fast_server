@@ -15,7 +15,7 @@
 #include <optional>
 #include "TcpSpi.hpp"
 #include "TcpApi.hpp"
-
+#include "spdlog/spdlog.h"
 
 #define DEFAULT_PORT    8080
 
@@ -28,7 +28,7 @@ struct Request {
 
 struct Response {
 	uint64_t timestamp;
-	std::string payload;
+	Request request;
 };
 
 #pragma pack(push, 1)
@@ -84,21 +84,23 @@ public:
 	}
 
 	std::optional<Request> tryDecode(SimpleBuffer& buffer) {
+		ScopedTimer timer(__func__);
 		if (buffer.size() < kHeaderLen) {
 			return {};
 		}
 		const char* data = buffer.data();
 		auto [type, messageLen] = getMessageTypeLength(data);
 		if (type != 2) {
-			std::printf("Unsupported message type: %d\n", type);
+			spdlog::warn("Unexpected message type: {}", type);
 			// close connection
 			return {};
 		}
 		if (messageLen < 0) {
-			printf("Invalid message length\n");
+			spdlog::warn("Invalid message length: {}", messageLen);
+			return {};
 		} else if (buffer.size() >= messageLen) {
 			buffer.advance(kHeaderLen);
-			printf("Received type: %d, length: %d\n", type, messageLen);
+			// spdlog::info("Received type: {}, length: {}", type, messageLen);
 			Request req = decode(buffer.data(), messageLen - kHeaderLen);
 			// printf("Decoded timestamp: %lu, payload: %s\n", req.timestamp, req.payload.c_str());
 			buffer.advance(messageLen - kHeaderLen);
@@ -110,21 +112,35 @@ public:
 	}
 
 	void encodeResponse(Response& response, std::vector<char>& output) {
-		output.resize(13 + response.payload.size());
-
+		ScopedTimer timer(__func__);
+		output.resize(21 + response.request.payload.size());
 		output[0] = 3; // type
-		uint32_t total_len = 13 + response.payload.size();
-		std::memcpy(output.data() + 1, &total_len, 4); // total length
-		// std::memcpy(output + 1, &total_len, 4);
+		uint32_t total_len = 21 + response.request.payload.size();
+		std::memcpy(output.data() + 1, &total_len, 4);
 		auto current_time = getMicroTimestamp();
-		// std::memcpy(output.data() + 5, &current_time, sizeof(current_time));
+
+		constexpr uint8_t kOffsets[2] = {0x4A, 0x51}; // 预定义偏移数组
+
 		for (int i = 0; i < 8; ++i) {
-			output[5 + i] = static_cast<char>((current_time >> (i * 8)) + (i % 2 ? 0x51 : 0x4A));
+			output[5 + i] = static_cast<char>((current_time >> (i * 8)) + kOffsets[i & 1]);
+		}
+		for (int i = 0; i < 8; ++i) {
+			output[13 + i] = static_cast<char>((response.request.timestamp >> (i * 8)) + kOffsets[i & 1]);
+		}
+		for (size_t i = 0; i < response.request.payload.size(); ++i) {
+			output[21 + i] = static_cast<char>(response.request.payload[i] + kOffsets[i & 1]);
 		}
 
-		for (size_t i = 0; i < response.payload.size(); ++i) {
-			output[13 + i] = static_cast<char>(response.payload[i] + (i % 2 ? 0x51 : 0x4A));
-		}
+		// for (int i = 0; i < 8; ++i) {
+		// 	output[5 + i] = static_cast<char>((current_time >> (i * 8)) + (i % 2 ? 0x51 : 0x4A));
+		// }
+		// for (int i = 0; i < 8; ++i) {
+		// 	output[13 + i] = static_cast<char>((response.request.timestamp >> (i * 8)) + (i % 2 ? 0x51 : 0x4A));
+		// }
+
+		// for (size_t i = 0; i < response.request.payload.size(); ++i) {
+		// 	output[21 + i] = static_cast<char>(response.request.payload[i] + (i % 2 ? 0x51 : 0x4A));
+		// }
 	}
 
 	void encodeData(Data& data, std::vector<char>& output) {
@@ -176,33 +192,33 @@ public:
 	void onMessage(std::shared_ptr<Connection> conn, const char* data, size_t len) override {
 		buffer_.write(data, len);
 		while (auto req = coder_.tryDecode(buffer_)) {
-			printf("Decoded timestamp: %lu, payload: %s\n", req->timestamp, req->payload.c_str());
+			// printf("Decoded timestamp: %lu, payload: %s\n", req->timestamp, req->payload.c_str());
 			Response response = generateEchoBackResponse(*req);
 			
-			// std::vector<char> response_buffer;
-			// coder_.encodeResponse(response, response_buffer);
-			// conn->send(response_buffer.data(), response_buffer.size());
-
 			std::vector<char> response_buffer;
-			Data data_to_send {
-				1,2,3,4,5,6,7,8,
-				{9, 10, 11, 12, 13},
-				{14, 15, 14, 13, 12},
-				{11, 10, 9, 8, 7},
-				{6, 5, 4, 3, 2},
-			};
-			coder_.encodeData(data_to_send, response_buffer);
+			coder_.encodeResponse(response, response_buffer);
 			conn->send(response_buffer.data(), response_buffer.size());
+
+			// std::vector<char> response_buffer;
+			// Data data_to_send {
+			// 	1,2,3,4,5,6,7,8,
+			// 	{9, 10, 11, 12, 13},
+			// 	{14, 15, 14, 13, 12},
+			// 	{11, 10, 9, 8, 7},
+			// 	{6, 5, 4, 3, 2},
+			// };
+			// coder_.encodeData(data_to_send, response_buffer);
+			// conn->send(response_buffer.data(), response_buffer.size());
 		}
 	}
 private:
 	Response generateEchoBackResponse(const Request& req) {
 		Response response;
 		response.timestamp = getMicroTimestamp();
-		response.payload.resize(req.payload.size() + 8);
+		response.request = req;
 		// write req time stamp and payload to response's payload
-		std::memcpy(response.payload.data(), &req.timestamp, sizeof(req.timestamp));
-		std::memcpy(response.payload.data() + 8, req.payload.data(), req.payload.size());
+		// std::memcpy(response.payload.data(), &req.timestamp, sizeof(req.timestamp));
+		// std::memcpy(response.payload.data() + 8, req.payload.data(), req.payload.size());
 		return response;
 	}
 private:
@@ -306,7 +322,6 @@ void client_run()
 	int n;
 	int c;
 	int sockfd;
-	char buf[1024];
 	struct sockaddr_in srv_addr;
 
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -318,36 +333,450 @@ void client_run()
 	}
 	for (;;) {
 		printf("input: ");
-		uint64_t t = getMicroTimestamp();
-		std::memcpy(buf, &t, sizeof(uint64_t));
+
 		char ch;
 		int num;
 		std::cin >> ch >> num;
+		char* buf = new char[100 + num];
+
+		uint64_t t = getMicroTimestamp();
+		std::memcpy(buf, &t, sizeof(uint64_t));
+		
 		for (int i = 0; i < num; ++i) {
 			buf[8 + i] = ch;
 		}
-		char out[1024];
-		auto n = encoder(2, buf, 8 + num, out, sizeof(out));
+		char* out = new char[100 + num];
+		auto n = encoder(2, buf, 8 + num, out, 100 + num + 5);
 		printf("send type: %d, len: %d\n", 2, n);
+		auto currentTime = getMicroTimestamp();
 		write(sockfd, out, n);
-
+		int expect = n + 5;
 		bzero(buf, sizeof(buf));
-		n = read(sockfd, buf, sizeof(buf));
+		n = read(sockfd, buf, 100 + num);
 		printf("echo length %d\n", n);
+		auto endTime = getMicroTimestamp();
+		// print latency in ms
+		printf("-----------latency: %ld us ----------\n", (endTime - currentTime) / 1);
 		
-		Data data = *reinterpret_cast<Data*>(buf + 5);
-		// print data struct
-		printf("id: %lu, cvl: %u, cto: %u, lpr: %u, opx: %u, cpx: %f, cpx_len: %u, opx_len: %u\n",
-			data.id, data.cvl, data.cto, data.lpr, data.opx, data.cpx, data.cpx_len, data.opx_len);
-		printf("bp: %d %d %d %d %d\n",
-			data.bp[0], data.bp[1], data.bp[2], data.bp[3], data.bp[4]);
-		printf("ap: %d %d %d %d %d\n",
-			data.ap[0], data.ap[1], data.ap[2], data.ap[3], data.ap[4]);
-		printf("bs: %d %d %d %d %d\n",
-			data.bs[0], data.bs[1], data.bs[2], data.bs[3], data.bs[4]);
-		printf("as: %d %d %d %d %d\n",
-			data.as[0], data.as[1], data.as[2], data.as[3], data.as[4]);
 		bzero(buf, sizeof(buf));
+
+		delete[] buf;
+		delete[] out;
 	}
 	close(sockfd);
 }
+
+/*
+
+Request decode(const char* data, size_t length) {
+    if (!data || length < 8)
+        return Request();
+
+    Request request;
+
+    // 时间戳解码 - 手动展开 + 预计算
+    const uint8_t offsets[] = {0x4A, 0x51, 0x4A, 0x51, 0x4A, 0x51, 0x4A, 0x51};
+    uint64_t decoded_timestamp = 0;
+    decoded_timestamp |= static_cast<uint64_t>(data[0] - offsets[0]) << 0;
+    decoded_timestamp |= static_cast<uint64_t>(data[1] - offsets[1]) << 8;
+    decoded_timestamp |= static_cast<uint64_t>(data[2] - offsets[2]) << 16;
+    decoded_timestamp |= static_cast<uint64_t>(data[3] - offsets[3]) << 24;
+    decoded_timestamp |= static_cast<uint64_t>(data[4] - offsets[4]) << 32;
+    decoded_timestamp |= static_cast<uint64_t>(data[5] - offsets[5]) << 40;
+    decoded_timestamp |= static_cast<uint64_t>(data[6] - offsets[6]) << 48;
+    decoded_timestamp |= static_cast<uint64_t>(data[7] - offsets[7]) << 56;
+    request.timestamp = decoded_timestamp;
+
+    // Payload 解码 - 使用 std::transform
+    const size_t payload_length = length - 8;
+    request.payload.resize(payload_length);
+
+    std::transform(data + 8, data + length, request.payload.begin(),
+        [i = 0U](char c) mutable {
+            return c - ((i++ % 2) ? 0x51 : 0x4A);
+        });
+
+    return request;
+}
+
+
+#include <atomic>
+#include <memory>
+#include <iostream>
+
+template<typename T>
+class LockFreeQueue {
+private:
+    struct Node {
+        T data;
+        std::atomic<Node*> next;
+
+        Node() : next(nullptr) {}
+        explicit Node(T value) : data(value), next(nullptr) {}
+    };
+
+    alignas(64) std::atomic<Node*> head;  // 避免伪共享
+    alignas(64) std::atomic<Node*> tail;
+
+public:
+    LockFreeQueue() {
+        // 初始化虚拟节点（Dummy Node）
+        Node* dummy = new Node();
+        head.store(dummy, std::memory_order_relaxed);
+        tail.store(dummy, std::memory_order_relaxed);
+    }
+
+    ~LockFreeQueue() {
+        while (pop());  // 清空队列
+        delete head.load();  // 释放虚拟节点
+    }
+
+    // 入队操作
+    void add(T value) {
+        Node* new_node = new Node(value);
+        Node* current_tail = nullptr;
+        Node* next = nullptr;
+
+        while (true) {
+            current_tail = tail.load(std::memory_order_acquire);
+            next = current_tail->next.load(std::memory_order_acquire);
+
+            // 检查tail是否被其他线程更新
+            if (current_tail != tail.load(std::memory_order_relaxed)) 
+                continue;
+
+            // 若next非空，说明其他线程已更新tail但未完成链接
+            if (next != nullptr) {
+                tail.compare_exchange_weak(
+                    current_tail, next, 
+                    std::memory_order_release, std::memory_order_relaxed
+                );
+                continue;
+            }
+
+            // 尝试链接新节点到尾部
+            if (current_tail->next.compare_exchange_weak(
+                next, new_node, 
+                std::memory_order_release, std::memory_order_relaxed
+            )) {
+                break;
+            }
+        }
+
+        // 更新tail指针（允许失败，其他线程会协助更新）
+        tail.compare_exchange_weak(
+            current_tail, new_node, 
+            std::memory_order_release, std::memory_order_relaxed
+        );
+    }
+
+    // 出队操作
+    bool pop(T& result) {
+        Node* current_head = nullptr;
+        Node* current_tail = nullptr;
+        Node* next = nullptr;
+
+        while (true) {
+            current_head = head.load(std::memory_order_acquire);
+            current_tail = tail.load(std::memory_order_acquire);
+            next = current_head->next.load(std::memory_order_acquire);
+
+            // 检查队列是否为空或head是否过时
+            if (current_head == head.load(std::memory_order_relaxed)) {
+                if (current_head == current_tail) {
+                    if (next == nullptr) return false;  // 队列为空
+                    // 协助更新tail
+                    tail.compare_exchange_weak(
+                        current_tail, next, 
+                        std::memory_order_release, std::memory_order_relaxed
+                    );
+                } else {
+                    result = next->data;  // 读取数据
+                    // 尝试移动head指针
+                    if (head.compare_exchange_weak(
+                        current_head, next, 
+                        std::memory_order_release, std::memory_order_relaxed
+                    )) {
+                        delete current_head;  // 释放旧头节点
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+};
+
+
+
+
+
+#include <vector>
+#include <memory>
+#include <cstddef>
+#include <cstring>
+#include <sys/uio.h> // For struct iovec
+#include <unistd.h>  // For readv, writev
+
+// 内存块描述符
+struct MemoryChunk {
+    void* data;        // 内存块起始地址
+    size_t size;       // 内存块大小
+    size_t used = 0;   // 已使用字节数
+    bool owned = true; // 是否拥有内存所有权
+
+    MemoryChunk(void* d, size_t s, bool own = true)
+        : data(d), size(s), owned(own) {}
+    
+    ~MemoryChunk() {
+        if (owned && data) {
+            free(data);
+            data = nullptr;
+        }
+    }
+};
+
+// 分段连续零拷贝缓冲区
+class ScatterGatherBuffer {
+public:
+    // 添加外部内存块（零拷贝）
+    void add_external_chunk(void* data, size_t size) {
+        chunks_.emplace_back(new MemoryChunk(data, size, false));
+        total_size_ += size;
+    }
+
+    // 分配新内存块
+    MemoryChunk* allocate_chunk(size_t size) {
+        void* new_data = malloc(size);
+        if (!new_data) return nullptr;
+        
+        chunks_.emplace_back(new MemoryChunk(new_data, size));
+        total_size_ += size;
+        return chunks_.back().get();
+    }
+
+    // 获取当前写位置
+    void* current_write_position() const {
+        if (chunks_.empty()) return nullptr;
+        auto& last = chunks_.back();
+        return static_cast<char*>(last->data) + last->used;
+    }
+
+    // 获取剩余可写空间
+    size_t remaining_space() const {
+        if (chunks_.empty()) return 0;
+        auto& last = chunks_.back();
+        return last->size - last->used;
+    }
+
+    // 提交写入数据
+    void commit_write(size_t bytes) {
+        if (chunks_.empty()) return;
+        
+        auto& last = chunks_.back();
+        const size_t actual = std::min(bytes, last->size - last->used);
+        last->used += actual;
+        total_used_ += actual;
+    }
+
+    // 准备 gather I/O 结构
+    std::vector<iovec> prepare_gather_io() const {
+        std::vector<iovec> vec;
+        vec.reserve(chunks_.size());
+        
+        for (const auto& chunk : chunks_) {
+            if (chunk->used == 0) continue;
+            
+            iovec iov;
+            iov.iov_base = chunk->data;
+            iov.iov_len = chunk->used;
+            vec.push_back(iov);
+        }
+        
+        return vec;
+    }
+
+    // 准备 scatter I/O 结构
+    std::vector<iovec> prepare_scatter_io() {
+        std::vector<iovec> vec;
+        vec.reserve(chunks_.size());
+        
+        for (auto& chunk : chunks_) {
+            if (chunk->used == chunk->size) continue;
+            
+            iovec iov;
+            iov.iov_base = static_cast<char*>(chunk->data) + chunk->used;
+            iov.iov_len = chunk->size - chunk->used;
+            vec.push_back(iov);
+        }
+        
+        return vec;
+    }
+
+    // 执行 gather write
+    ssize_t gather_write(int fd) {
+        auto iovs = prepare_gather_io();
+        return writev(fd, iovs.data(), iovs.size());
+    }
+
+    // 执行 scatter read
+    ssize_t scatter_read(int fd) {
+        auto iovs = prepare_scatter_io();
+        ssize_t bytes_read = readv(fd, iovs.data(), iovs.size());
+        if (bytes_read > 0) {
+            // 更新缓冲区使用情况
+            size_t remaining = bytes_read;
+            for (auto& chunk : chunks_) {
+                if (remaining == 0) break;
+                
+                const size_t space = chunk->size - chunk->used;
+                const size_t to_use = std::min(space, static_cast<size_t>(remaining));
+                
+                chunk->used += to_use;
+                total_used_ += to_use;
+                remaining -= to_use;
+            }
+        }
+        return bytes_read;
+    }
+
+    // 获取总数据量
+    size_t total_size() const { return total_size_; }
+    size_t total_used() const { return total_used_; }
+
+    // 拼接所有数据到连续内存 (可选)
+    std::vector<char> flatten() const {
+        std::vector<char> result(total_used_);
+        char* ptr = result.data();
+        
+        for (const auto& chunk : chunks_) {
+            if (chunk->used == 0) continue;
+            memcpy(ptr, chunk->data, chunk->used);
+            ptr += chunk->used;
+        }
+        
+        return result;
+    }
+
+private:
+    std::vector<std::unique_ptr<MemoryChunk>> chunks_;
+    size_t total_size_ = 0;   // 总容量
+    size_t total_used_ = 0;   // 已使用字节
+};
+
+
+
+#include <memory>
+#include <functional>
+
+class SegmentBuffer {
+public:
+    // 添加外部内存并转移所有权
+    void add_segment(std::unique_ptr<uint8_t[]> data, size_t size) {
+        segments_.emplace_back(Segment{
+            .data = data.release(),
+            .size = size,
+            .deleter = [](void* ptr) { delete[] static_cast<uint8_t*>(ptr); }
+        });
+    }
+
+    // 添加外部内存并指定自定义删除器
+    void add_segment(void* data, size_t size, std::function<void(void*)> deleter) {
+        segments_.emplace_back(Segment{
+            .data = data,
+            .size = size,
+            .deleter = std::move(deleter)
+        });
+    }
+
+    ~SegmentBuffer() {
+        for (auto& seg : segments_) {
+            if (seg.deleter) {
+                seg.deleter(seg.data);
+            }
+        }
+    }
+
+private:
+    struct Segment {
+        void* data;
+        size_t size;
+        std::function<void(void*)> deleter;
+    };
+
+    std::vector<Segment> segments_;
+};
+
+
+#include <vector>
+#include <mutex>
+#include <unordered_set>
+
+class MemoryPool {
+public:
+    // 分配内存并注册到池中
+    void* allocate(size_t size) {
+        void* mem = ::malloc(size);
+        if (!mem) return nullptr;
+        
+        std::lock_guard<std::mutex> lock(mutex_);
+        allocated_.insert(mem);
+        return mem;
+    }
+
+    // 释放内存（仅当在池中注册过）
+    void deallocate(void* ptr) {
+        if (!ptr) return;
+        
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (allocated_.find(ptr) != allocated_.end()) {
+            ::free(ptr);
+            allocated_.erase(ptr);
+        }
+    }
+
+    // 显式注册外部内存
+    void register_external(void* ptr) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        external_.insert(ptr);
+    }
+
+    // 取消注册外部内存
+    void unregister_external(void* ptr) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        external_.erase(ptr);
+    }
+
+    // 检查内存是否受管理
+    bool is_managed(void* ptr) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return allocated_.find(ptr) != allocated_.end() || 
+               external_.find(ptr) != external_.end();
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::unordered_set<void*> allocated_;
+    std::unordered_set<void*> external_;
+};
+
+class SegmentBuffer {
+public:
+    SegmentBuffer(MemoryPool& pool) : pool_(pool) {}
+
+    void add_segment(void* data, size_t size) {
+        pool_.register_external(data);
+        segments_.push_back({data, size});
+    }
+
+    ~SegmentBuffer() {
+        for (auto& seg : segments_) {
+            pool_.unregister_external(seg.data);
+        }
+    }
+
+private:
+    MemoryPool& pool_;
+    std::vector<std::pair<void*, size_t>> segments_;
+};
+
+*/

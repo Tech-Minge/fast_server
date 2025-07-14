@@ -1,21 +1,23 @@
 #pragma once
 
 #include <vector>
-
+#include "Utils.hpp"
 class SimpleBuffer {
 public:
     SimpleBuffer() = default;
     ~SimpleBuffer() = default;
 
     void write(const char* data, size_t len) {
+        ScopedTimer timer(__func__);
         buffer_.insert(buffer_.end(), data, data + len);
         writePos_ += len;
     }
     void advance(size_t len) {
+        // ScopedTimer timer(__func__);
         readPos_ += len;
         if (noData()) {
             // reset buffer size to 0
-            std::vector<char>().swap(buffer_);
+            buffer_.resize(0);
             readPos_ = 0;
             writePos_ = 0;
         }
