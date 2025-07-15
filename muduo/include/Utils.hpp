@@ -19,6 +19,28 @@ private:
     std::chrono::steady_clock::time_point start;
 };
 
+class Spinlock {
+private:
+  std::atomic<bool> lock_ = {0};
+public:
+  void lock() noexcept {
+    for (;;) {
+      if (!lock_.exchange(true, std::memory_order_acquire)) {
+        return;
+      }
+      // Wait for lock to be released without generating cache misses
+      while (lock_.load(std::memory_order_relaxed)) {
+        
+      }
+    }
+  }
+
+  void unlock() noexcept {
+    lock_.store(false, std::memory_order_release);
+  }
+};
+
+
 
 /*
 #include <chrono>

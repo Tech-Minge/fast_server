@@ -19,6 +19,9 @@ public:
     }
     void checkNeedClose();
     FdWrapper& fdWrapper() { return fdWrapper_; }
+    int64_t registerTimer(int64_t interval_ms, std::function<void()> callback, bool recurring = false);
+    bool cancelTimer(int64_t timer_id);
+
 private:
     std::atomic<bool> tryClose_ {false};
     bool closed_ = false;

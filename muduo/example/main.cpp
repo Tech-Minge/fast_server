@@ -16,6 +16,8 @@
 #include "TcpSpi.hpp"
 #include "TcpApi.hpp"
 #include "spdlog/spdlog.h"
+#include "spdlog/sinks/basic_file_sink.h"
+#include "spdlog/async.h"
 
 #define DEFAULT_PORT    8080
 
@@ -83,64 +85,43 @@ public:
 		return std::make_pair(type, len);
 	}
 
-	std::optional<Request> tryDecode(SimpleBuffer& buffer) {
-		ScopedTimer timer(__func__);
+	std::pair<int, bool> decode(SimpleBuffer& buffer) {
 		if (buffer.size() < kHeaderLen) {
-			return {};
+			return {0, false};
 		}
 		const char* data = buffer.data();
 		auto [type, messageLen] = getMessageTypeLength(data);
 		if (type != 2) {
-			spdlog::warn("Unexpected message type: {}", type);
+			// spdlog::warn("Unexpected message type: {}", type);
 			// close connection
-			return {};
+			return {0, false};
 		}
 		if (messageLen < 0) {
-			spdlog::warn("Invalid message length: {}", messageLen);
-			return {};
+			// spdlog::warn("Invalid message length: {}", messageLen);
+			return {0, false};
 		} else if (buffer.size() >= messageLen) {
 			buffer.advance(kHeaderLen);
-			// spdlog::info("Received type: {}, length: {}", type, messageLen);
-			Request req = decode(buffer.data(), messageLen - kHeaderLen);
-			// printf("Decoded timestamp: %lu, payload: %s\n", req.timestamp, req.payload.c_str());
-			buffer.advance(messageLen - kHeaderLen);
-			return req;
+			auto timestamp = decodeTimeStamp(buffer.data(), messageLen - kHeaderLen);
+            auto timediff = getMicroTimestamp() - timestamp;
+            spdlog::warn("timeSinceSend cost: {}us", timediff);
+			return {messageLen - kHeaderLen, true};
 		} else {
-			printf("Not enough data for a complete message\n");
-			return {};
+            // spdlog::warn("Buffer size {} is less than expected message length {}", buffer.size(), messageLen);
+			return {0, false};
 		}
 	}
 
-	void encodeResponse(Response& response, std::vector<char>& output) {
+	void encodeHeaderWithTimeStamp(std::vector<char>& output, uint32_t totalLen) {
 		ScopedTimer timer(__func__);
-		output.resize(21 + response.request.payload.size());
-		output[0] = 3; // type
-		uint32_t total_len = 21 + response.request.payload.size();
-		std::memcpy(output.data() + 1, &total_len, 4);
+		output[0] = 3;
+		std::memcpy(output.data() + 1, &totalLen, 4);
 		auto current_time = getMicroTimestamp();
 
-		constexpr uint8_t kOffsets[2] = {0x4A, 0x51}; // 预定义偏移数组
+		constexpr uint8_t kOffsets[2] = {0x4A, 0x51};
 
 		for (int i = 0; i < 8; ++i) {
 			output[5 + i] = static_cast<char>((current_time >> (i * 8)) + kOffsets[i & 1]);
 		}
-		for (int i = 0; i < 8; ++i) {
-			output[13 + i] = static_cast<char>((response.request.timestamp >> (i * 8)) + kOffsets[i & 1]);
-		}
-		for (size_t i = 0; i < response.request.payload.size(); ++i) {
-			output[21 + i] = static_cast<char>(response.request.payload[i] + kOffsets[i & 1]);
-		}
-
-		// for (int i = 0; i < 8; ++i) {
-		// 	output[5 + i] = static_cast<char>((current_time >> (i * 8)) + (i % 2 ? 0x51 : 0x4A));
-		// }
-		// for (int i = 0; i < 8; ++i) {
-		// 	output[13 + i] = static_cast<char>((response.request.timestamp >> (i * 8)) + (i % 2 ? 0x51 : 0x4A));
-		// }
-
-		// for (size_t i = 0; i < response.request.payload.size(); ++i) {
-		// 	output[21 + i] = static_cast<char>(response.request.payload[i] + (i % 2 ? 0x51 : 0x4A));
-		// }
 	}
 
 	void encodeData(Data& data, std::vector<char>& output) {
@@ -150,32 +131,23 @@ public:
 		std::memcpy(output.data() + 1, &total_len, 4);
 		std::memcpy(output.data() + 5, &data, sizeof(Data));
 		for (size_t i = 0; i < sizeof(Data); ++i) {
-			output[i + 5] += 0; // i % 2 ? 0x51 : 0x4A;
+			output[i + 5] += i % 2 ? 0x51 : 0x4A;
 		}
 	}
 
 private:
-	Request decode(const char* data, size_t length) {
-		if (!data) 
-			return Request();
-		
-		Request request;
-
+	uint64_t decodeTimeStamp(const char* data, size_t length) {
+        ScopedTimer timer(__func__);
+		if (!data) {
+			std::abort();
+        }
 		uint64_t decoded_timestamp = 0;
 		for (int i = 0; i < 8; ++i) {
 			uint8_t decoded_byte = data[i] -  (i % 2 ? 0x51 : 0x4A);
 			decoded_timestamp |= (static_cast<uint64_t>(decoded_byte) << (i * 8));
 		}
-		request.timestamp = decoded_timestamp;
 		
-		const size_t payload_length = length - 8;
-		request.payload.resize(payload_length);
-		
-		char* payload_ptr = &request.payload[0];
-		for (size_t i = 8; i < length; ++i) {
-			payload_ptr[i - 8] = data[i] -  (i % 2 ? 0x51 : 0x4A);
-		}
-		return request;
+		return decoded_timestamp;
 	}
 private:
 	constexpr static size_t kHeaderLen = 5;
@@ -184,47 +156,294 @@ private:
 class CubeServer: public TcpSpi {
 public:
 	void onAccepted(std::shared_ptr<Connection> conn) override {
+        spdlog::info("onAccepted called with fd: {}", conn->fdWrapper().fd());
+        auto id = conn->registerTimer(10000, [conn] {
+            // heartbeat
+            spdlog::info("heartbeat");
+        }, true);
+        timerId_ = id;
+        spdlog::info("Connection accepted with timer ID: {}", id);
 	}
 
 	void onDisconnected(std::shared_ptr<Connection> conn, int reason, const char* reason_str) override {
+        bool res = conn->cancelTimer(timerId_);
+        spdlog::info("Connection disconnected with timer ID: {}, res: {}", timerId_, res);
 	}
 
 	void onMessage(std::shared_ptr<Connection> conn, const char* data, size_t len) override {
-		buffer_.write(data, len);
-		while (auto req = coder_.tryDecode(buffer_)) {
-			// printf("Decoded timestamp: %lu, payload: %s\n", req->timestamp, req->payload.c_str());
-			Response response = generateEchoBackResponse(*req);
-			
-			std::vector<char> response_buffer;
-			coder_.encodeResponse(response, response_buffer);
-			conn->send(response_buffer.data(), response_buffer.size());
-
-			// std::vector<char> response_buffer;
-			// Data data_to_send {
-			// 	1,2,3,4,5,6,7,8,
-			// 	{9, 10, 11, 12, 13},
-			// 	{14, 15, 14, 13, 12},
-			// 	{11, 10, 9, 8, 7},
-			// 	{6, 5, 4, 3, 2},
-			// };
-			// coder_.encodeData(data_to_send, response_buffer);
-			// conn->send(response_buffer.data(), response_buffer.size());
-		}
-	}
-private:
-	Response generateEchoBackResponse(const Request& req) {
-		Response response;
-		response.timestamp = getMicroTimestamp();
-		response.request = req;
-		// write req time stamp and payload to response's payload
-		// std::memcpy(response.payload.data(), &req.timestamp, sizeof(req.timestamp));
-		// std::memcpy(response.payload.data() + 8, req.payload.data(), req.payload.size());
-		return response;
+		// write connection's private buffer
+        buffer_.write(data, len);
+		{
+            ScopedTimer timer("onMessageLoop");
+            for (;;) {
+                auto [messageBodyLen, valid] = coder_.decode(buffer_);
+                if (!valid) {
+                    break; // 退出循环，等待下次消息
+                }
+                auto sendLen = messageBodyLen + 5 + 8;
+                std::vector<char> header(13);
+                coder_.encodeHeaderWithTimeStamp(header, messageBodyLen);
+                {
+                    ScopedTimer timer("sendData");
+                    conn->send(header.data(), header.size());
+                    conn->send(buffer_.data(), messageBodyLen);
+                }
+                
+                buffer_.advance(messageBodyLen);
+            }
+        }
 	}
 private:
 	Coder coder_;
 	SimpleBuffer buffer_;
+    uint64_t timerId_;
 };
+
+
+/*
+void onAccepted(std::shared_ptr<Connection> conn) override {
+    int fd = conn->fdWrapper().fd();
+    lastActiveMap_[fd] = std::chrono::steady_clock::now();
+
+    auto id = conn->registerTimer(10000, [this, conn, fd] {
+        auto now = std::chrono::steady_clock::now();
+        auto lastActive = lastActiveMap_[fd];
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - lastActive).count();
+
+        spdlog::info("heartbeat, idle for {}s", elapsed);
+
+        if (elapsed > 30) {  // 超过 30 秒未活动，断开连接
+            spdlog::warn("Closing idle connection: fd={}", fd);
+            conn->close();  // 触发 onDisconnected
+        }
+    }, true);
+    timerId_ = id;
+}
+
+
+void onMessage(std::shared_ptr<Connection> conn, const char* data, size_t len) override {
+    // 更新活跃时间
+    lastActiveMap_[conn->fdWrapper().fd()] = std::chrono::steady_clock::now();
+
+    buffer_.write(data, len);
+    // ... 保持原有逻辑 ...
+}
+
+// 可定义在 Connection 或 CubeServer 的某个映射中
+std::unordered_map<int, std::chrono::steady_clock::time_point> lastActiveMap_;
+
+
+
+#include <chrono>
+#include <memory>
+#include <unordered_map>
+#include <spdlog/spdlog.h>
+
+class CubeServer : public TcpSpi {
+public:
+    void onAccepted(std::shared_ptr<Connection> conn) override {
+        spdlog::info("onAccepted called with fd: {}", conn->fdWrapper().fd());
+        
+        // 为连接创建状态管理对象
+        auto connState = std::make_shared<ConnectionState>();
+        connStates_[conn->fdWrapper().fd()] = connState;
+        
+        // 注册心跳定时器
+        auto heartbeatTimerId = conn->registerTimer(10000, [conn, connState] {
+            // 检查是否超时
+            auto now = std::chrono::steady_clock::now();
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - connState->lastActivityTime
+            );
+            
+            if (elapsed.count() > 30000) { // 30秒超时
+                spdlog::warn("Connection timeout detected, fd: {}", conn->fdWrapper().fd());
+                conn->close(); // 主动关闭连接
+                return;
+            }
+            
+            // 发送心跳消息
+            const char heartbeatMsg[] = "\x08HEARTBEAT"; // 自定义心跳协议
+            conn->send(heartbeatMsg, sizeof(heartbeatMsg) - 1);
+            spdlog::debug("Heartbeat sent to fd: {}", conn->fdWrapper().fd());
+        }, true); // 重复执行的定时器
+        
+        connState->heartbeatTimerId = heartbeatTimerId;
+        spdlog::info("Connection accepted with heartbeat timer ID: {}", heartbeatTimerId);
+    }
+
+    void onDisconnected(std::shared_ptr<Connection> conn, int reason, const char* reason_str) override {
+        int fd = conn->fdWrapper().fd();
+        auto it = connStates_.find(fd);
+        if (it != connStates_.end()) {
+            // 取消心跳定时器
+            bool res = conn->cancelTimer(it->second->heartbeatTimerId);
+            spdlog::info("Connection disconnected fd: {}, cancel timer: {}, result: {}", 
+                         fd, it->second->heartbeatTimerId, res);
+            
+            // 清理连接状态
+            connStates_.erase(it);
+        } else {
+            spdlog::warn("Connection state not found for fd: {}", fd);
+        }
+    }
+
+    void onMessage(std::shared_ptr<Connection> conn, const char* data, size_t len) override {
+        int fd = conn->fdWrapper().fd();
+        auto it = connStates_.find(fd);
+        if (it == connStates_.end()) {
+            spdlog::error("Connection state missing for fd: {}", fd);
+            return;
+        }
+        
+        // 更新最后活动时间
+        it->second->lastActivityTime = std::chrono::steady_clock::now();
+        
+        // 处理心跳响应
+        if (len == 4 && memcmp(data, "PONG", 4) == 0) {
+            spdlog::debug("Received PONG from fd: {}", fd);
+            return; // 不需要进一步处理心跳响应
+        }
+        
+        // 处理正常业务消息
+        buffer_.write(data, len);
+        {
+            ScopedTimer timer("onMessageLoop");
+            for (;;) {
+                auto [messageBodyLen, valid] = coder_.decode(buffer_);
+                if (!valid) {
+                    break; // 退出循环，等待下次消息
+                }
+                auto sendLen = messageBodyLen + 5 + 8;
+                std::vector<char> header(13);
+                coder_.encodeHeaderWithTimeStamp(header, messageBodyLen);
+                {
+                    ScopedTimer timer("sendData");
+                    conn->send(header.data(), header.size());
+                    conn->send(buffer_.data(), messageBodyLen);
+                }
+                
+                buffer_.advance(messageBodyLen);
+            }
+        }
+    }
+
+private:
+    // 连接状态管理
+    struct ConnectionState {
+        std::chrono::steady_clock::time_point lastActivityTime;
+        uint64_t heartbeatTimerId;
+        
+        ConnectionState() : lastActivityTime(std::chrono::steady_clock::now()) {}
+    };
+    
+    std::unordered_map<int, std::shared_ptr<ConnectionState>> connStates_;
+    Coder coder_;
+    SimpleBuffer buffer_;
+};
+
+
+
+
+
+
+#include <iostream>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <queue>
+#include <memory>
+
+// 模拟连接对象
+class Connection {
+public:
+    void sendData(const std::string& data) {
+        std::cout << "Sending data: " << data << " via Connection " << this << std::endl;
+    }
+};
+
+// ClassB：消费者，处理连接对象
+class ClassB {
+private:
+    std::mutex mtx_;
+    std::condition_variable cv_;
+    std::queue<std::shared_ptr<Connection>> conn_queue_;
+    bool stop_flag_ = false;
+
+public:
+    // 后台线程运行函数
+    void run() {
+        while (true) {
+            std::shared_ptr<Connection> conn;
+            {
+                std::unique_lock<std::mutex> lock(mtx_);
+                // 等待唤醒条件：队列非空或停止信号
+                cv_.wait(lock, [this] { return !conn_queue_.empty() || stop_flag_; });
+                if (stop_flag_ && conn_queue_.empty()) break;
+
+                conn = conn_queue_.front();
+                conn_queue_.pop();
+            }
+
+            // 处理连接：发送数据
+            conn->sendData("Processed by ClassB");
+            std::cout << "ClassB: Data sent. Going back to sleep..." << std::endl;
+        }
+    }
+
+    // 添加连接并唤醒线程
+    void addConnection(std::shared_ptr<Connection> conn) {
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            conn_queue_.push(conn);
+        }
+        cv_.notify_one(); // 唤醒处理线程
+    }
+
+    // 停止线程
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            stop_flag_ = true;
+        }
+        cv_.notify_one();
+    }
+};
+
+// ClassA：生产者，生成连接对象并提交给ClassB
+class ClassA {
+private:
+    ClassB& class_b_; // 持有ClassB的引用
+
+public:
+    ClassA(ClassB& b) : class_b_(b) {}
+
+    void generateConnection() {
+        auto conn = std::make_shared<Connection>();
+        std::cout << "ClassA: Generated Connection " << conn.get() << std::endl;
+        class_b_.addConnection(conn); // 提交连接并唤醒ClassB
+    }
+};
+
+int main() {
+    ClassB class_b;
+    ClassA class_a(class_b);
+
+    // 启动ClassB的后台线程
+    std::thread worker_thread([&class_b] { class_b.run(); });
+
+    // 模拟生产连接
+    for (int i = 0; i < 3; ++i) {
+        class_a.generateConnection();
+        std::this_thread::sleep_for(std::chrono::seconds(1)); // 模拟生产间隔
+    }
+
+    // 停止ClassB线程
+    class_b.stop();
+    worker_thread.join();
+    return 0;
+}
+*/
 
 class EchoServer: public TcpSpi {
 public:
@@ -258,8 +477,11 @@ void reactor_run()
 
 int main(int argc, char *argv[])
 {
-	
-	int opt;
+	auto logger = spdlog::create_async_nb<spdlog::sinks::basic_file_sink_mt>("async_logger", "log/muduo.log");
+	spdlog::set_default_logger(logger);
+    spdlog::set_level(spdlog::level::info);
+    spdlog::flush_every(std::chrono::seconds(3));
+    int opt;
 	char role = 's';
 	while ((opt = getopt(argc, argv, "cs")) != -1) {
 		switch (opt) {
@@ -347,9 +569,10 @@ void client_run()
 		}
 		char* out = new char[100 + num];
 		auto n = encoder(2, buf, 8 + num, out, 100 + num + 5);
-		printf("send type: %d, len: %d\n", 2, n);
 		auto currentTime = getMicroTimestamp();
-		write(sockfd, out, n);
+		int act = write(sockfd, out, n);
+        printf("send len: %d\n", act);
+
 		int expect = n + 5;
 		bzero(buf, sizeof(buf));
 		n = read(sockfd, buf, 100 + num);

@@ -11,7 +11,7 @@ Connection::Connection(FdWrapper fdWrapper, SubReactor* subReactor)
 }
 
 void Connection::send(const char* data, size_t len) {
-    ScopedTimer timer(__func__);
+    ScopedTimer timer("ConnectionSend");
     if (tryClose_) {
         return;
     }
@@ -36,4 +36,11 @@ void Connection::checkNeedClose() {
         subReactor_->removeConnection(fdWrapper_);
         closed_ = true;
     }
+}
+int64_t Connection::registerTimer(int64_t interval_ms, std::function<void()> callback, bool recurring) {
+    return subReactor_->registerTimer(interval_ms, callback, recurring);
+}
+
+bool Connection::cancelTimer(int64_t timer_id) {
+    return subReactor_->cancelTimer(timer_id);
 }

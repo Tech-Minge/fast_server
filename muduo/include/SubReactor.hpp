@@ -8,6 +8,8 @@
 #include <functional>
 #include <chrono>
 #include <set>
+#include <Utils.hpp>
+
 class SubReactor: public Reactor, public std::enable_shared_from_this<SubReactor> {
 public:
     using ConnectionPtr = std::shared_ptr<Connection>;
@@ -31,6 +33,9 @@ public:
     bool cancelTimer(int64_t timer_id);
     void handleTimerEvents();
 
+    void updateNextTimer();
+    void disableTimer();
+    
     void handlePipe();
 
     void processSendQueue(); // 处理发送队列中的事件
@@ -49,9 +54,12 @@ private:
     int pipeFds_[2]; // pipe 用于通知新连接
     std::thread thread_;
     ConnectionMap connectionMap_; // 管理连接的映射
-    std::queue<int> newConnections_;
-    std::queue<int> sendQueue_;
-    std::mutex queueMutex_;
+    std::vector<int> newConnections_;
+    std::vector<int> sendQueue_;
+    std::mutex connMutex_;
+    std::mutex sendMutex_;
+    Spinlock connSpinlock_;
+    Spinlock sendSpinlock_;
 
     int timer_fd_ = -1; // timerfd 文件描述符
     std::atomic<int64_t> next_timer_id_{0}; // 定时器ID生成器

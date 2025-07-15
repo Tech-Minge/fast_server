@@ -44,8 +44,9 @@ logic2() {
         --target install
 
     export LD_LIBRARY_PATH=./install/lib:$LD_LIBRARY_PATH
-    ./install/bin/main
+    rm log/*
 
+    ./install/bin/main
 }
 
 # 主参数处理逻辑

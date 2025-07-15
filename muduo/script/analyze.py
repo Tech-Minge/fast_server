@@ -16,7 +16,8 @@ def parse_spdlog_file(file_path):
             match = re.match(pattern, line)
             if match:
                 timestamp, log_level, func_name, cost_us = match.groups()
-                function_times[func_name].append(int(cost_us))
+                if int(cost_us) > 0:  # 只记录耗时大于0的函数
+                    function_times[func_name].append(int(cost_us))
     
     return function_times
 
@@ -45,12 +46,12 @@ def print_statistics(stats):
     """
     格式化输出统计结果
     """
-    print("{:<15} {:<8} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10}".format(
+    print("{:<30} {:<8} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10}".format(
         "Function", "Count", "Avg(us)", "P95(us)", "P99(us)", "Min(us)", "Max(us)", "StdDev"
     ))
-    print("-" * 85)
+    print("-" * 100)
     for func, data in stats.items():
-        print("{:<15} {:<8} {:<10.2f} {:<10.2f} {:<10.2f} {:<10} {:<10} {:<10.2f}".format(
+        print("{:<30} {:<8} {:<10.2f} {:<10.2f} {:<10.2f} {:<10} {:<10} {:<10.2f}".format(
             func, 
             data["count"],
             data["average"],
@@ -62,7 +63,7 @@ def print_statistics(stats):
         ))
 
 if __name__ == "__main__":
-    file_path = "log"  # 替换为你的日志文件路径
+    file_path = "log/muduo.log"  # 替换为你的日志文件路径
     function_times = parse_spdlog_file(file_path)
     
     if not function_times:
@@ -72,5 +73,3 @@ if __name__ == "__main__":
     stats = calculate_statistics(function_times)
     print_statistics(stats)
     
-    # 可选：导出为CSV
-    pd.DataFrame(stats).T.to_csv("log_stats.csv")
