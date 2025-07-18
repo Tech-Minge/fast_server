@@ -210,38 +210,12 @@ void SubReactor::handleRead(FdWrapper& fdw) {
 }
 
 void SubReactor::handleWrite(FdWrapper fdw) {
-    auto conn = connectionMap_[fdw.fd()];
-    if (conn->sendBuffer().noData()) {
-        spdlog::debug("No data to write on fd={}", conn->fdWrapper().fd());
+    auto it = connectionMap_.find(fdw.fd());
+    if (it == connectionMap_.end()) {
+        spdlog::warn("No connection found for fd={}", fdw.fd());
         return;
     }
-
-    ScopedTimer timer(__func__);
-    {
-        ScopedTimer timer("Purewrite");
-
-        do {
-            auto writeChunkSize = std::min(conn->sendBuffer().size(), static_cast<size_t>(1024 * 8)); // 每次写入4096字节
-            ssize_t n;
-            {
-                n = write(conn->fdWrapper().fd(), conn->sendBuffer().data(), writeChunkSize);
-            }
-            if (n < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    // spdlog::debug("Write would block on fd={}", conn->fdWrapper().fd());
-                    break; // 非阻塞模式下，退出循环
-                } else {
-                    spi_->onDisconnected(conn, 3, "write error");
-                    removeConnection(conn->fdWrapper());
-                    return;
-                }
-            } else if (n == 0) {
-                break; // 连接可能已经关闭
-            } else {
-                conn->sendBuffer().advance(n); // 更新发送缓冲区
-            }
-        } while (conn->sendBuffer().size() > 0);
-    }
+    it->second->sendBufferedData();
 
 }
 

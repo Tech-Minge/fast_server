@@ -1,17 +1,4 @@
-cmake_minimum_required(VERSION 3.14)
-project(example)
 
-# 设置 C++ 标准
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-# add_compile_options(-Wall -Wextra -pedantic -Werror)  # 全局生效
-
-find_library(Tcp_LIB
-  NAMES tcp
-  HINTS "${CMAKE_PREFIX_PATH}/lib"
-  REQUIRED
-)
 
 # find_library(Spd_LIB
 #   NAMES spdlog
@@ -23,9 +10,9 @@ find_library(Tcp_LIB
 # 创建可执行文件
 add_executable(main main.cpp)
 
-
+add_executable(client client.cpp)
 # 链接库
-target_link_libraries(main PRIVATE ${Tcp_LIB})
+target_link_libraries(main PRIVATE tcp)
 # target_link_libraries(main PRIVATE Boost::program_options)
 
 

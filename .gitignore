@@ -3,3 +3,4 @@ lib/
 install/
 html/
 .vscode/
+*log*

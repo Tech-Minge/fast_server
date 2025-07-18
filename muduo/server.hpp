@@ -1195,6 +1195,8 @@ private:
             loop_->CancelTimerTask(id_);
         }
     }
+    void sendBufferedData();
+
     void ProtocolSwitchingInLoop(const Any &context,
                  const ConnectCallBack &connect_callback,
                  const MessageCallBack &message_callback,

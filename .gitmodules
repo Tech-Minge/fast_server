@@ -1,3 +1,6 @@
 [submodule "muduo/third_party/spdlog"]
 	path = muduo/third_party/spdlog
 	url = https://gitclone.com/github.com/gabime/spdlog.git
+[submodule "ihs/third_party/snappy"]
+	path = ihs/third_party/snappy
+	url = https://gitclone.com/github.com/google/snappy.git
