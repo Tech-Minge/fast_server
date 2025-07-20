@@ -11,6 +11,9 @@
 #include <mutex>
 #include <queue>
 #include <atomic>
+#include <spdlog/spdlog.h>
+#include <spdlog/async.h>
+#include <spdlog/sinks/basic_file_sink.h>
 
 // 自定义结构体（需与客户端一致）
 struct LoginRequest {
@@ -75,6 +78,14 @@ void receiveThread(int sockfd, const sockaddr_in& clientAddr) {
 }
 
 int main(int argc, char* argv[]) {
+    auto logger = spdlog::basic_logger_mt<spdlog::async_factory>(
+        "micro_log", "logs_micro.txt");
+    logger->set_pattern("[%Y-%m-%d %T.%f] [t=%t] %v");
+    
+    // 测试输出
+    logger->info("Order executed at microsecond precision");
+    return 0;
+
     if (argc != 3) {
         std::cerr << "Usage: " << argv[0] << " <IP> <Port>\n";
         return 1;

@@ -235,9 +235,13 @@ void reactor_run()
 int main(int argc, char *argv[])
 {
 	auto logger = spdlog::create_async_nb<spdlog::sinks::basic_file_sink_mt>("async_logger", "log/muduo.log");
-	spdlog::set_default_logger(logger);
+    spdlog::set_default_logger(logger);
     spdlog::set_level(spdlog::level::info);
+    spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%f] [%l] %v");
     spdlog::flush_every(std::chrono::seconds(3));
+    spdlog::info("finish decode 11");
+    spdlog::info("finish algo 11");
+    return 0;
     int opt;
 	char role = 's';
 	while ((opt = getopt(argc, argv, "cs")) != -1) {

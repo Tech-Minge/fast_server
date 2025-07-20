@@ -10,7 +10,7 @@ INSTALL_DIR=${INSTALL_DIR:-install}
 
 
 mkdir -p ${BUILD_DIR}
-rm -rf ${BUILD_DIR}/*
+# rm -rf ${BUILD_DIR}/*
 
 cmake \
     -S ${SOURCE_DIR} \

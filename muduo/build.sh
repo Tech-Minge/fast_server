@@ -10,7 +10,7 @@ INSTALL_DIR=${INSTALL_DIR:-install}
 
 
 mkdir -p ${BUILD_DIR}
-rm -rf ${BUILD_DIR}/*
+# rm -rf ${BUILD_DIR}/*
 
 cmake \
     -S ${SOURCE_DIR} \
@@ -23,7 +23,7 @@ cmake --build ${BUILD_DIR} \
     --target install
 
 export LD_LIBRARY_PATH=./install/lib:$LD_LIBRARY_PATH
-rm log/*
+# rm log/*
 
 ./install/bin/main
 

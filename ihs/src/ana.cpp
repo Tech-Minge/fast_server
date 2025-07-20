@@ -107,7 +107,7 @@ void process_thread_func() {
     }
 }
 
-int main() {
+int test() {
     // 创建UDP套接字
     int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) {

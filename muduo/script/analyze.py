@@ -1,75 +1,145 @@
 import re
+from datetime import datetime
 import numpy as np
-import pandas as pd
-from collections import defaultdict
+from scapy.all import PcapReader, UDP
+import argparse
+import json
 
-def parse_spdlog_file(file_path):
+# ===================================================
+# 1. 解析 tcpdump 的 PCAP 文件
+# ===================================================
+def parse_pcap(pcap_path: str) -> dict:
     """
-    解析spdlog日志文件，提取函数名和耗时（微秒）
-    格式示例：[2025-07-14 23:31:36.394] [warning] advance cost: 0us
+    提取 UDP 包的前4字节作为 seqno，记录微秒时间戳
     """
-    pattern = r'\[(.*?)\] \[(\w+)\]\s+(\w+)\s+cost:\s+(\d+)us'
-    function_times = defaultdict(list)
+    udp_data = {}
+    with PcapReader(pcap_path) as pcap:
+        for pkt in pcap:
+            if UDP in pkt and pkt[UDP].payload:
+                # 提取时间戳（转换为微秒整数）
+                timestamp = int(pkt.time * 1e6)  
+                # 提取前4字节作为 seqno（大端序）
+                payload = bytes(pkt[UDP].payload)
+                if len(payload) >= 4:
+                    seqno = int.from_bytes(payload[:4], 'big')
+                    udp_data[seqno] = timestamp
+    return udp_data
+
+# ===================================================
+# 2. 解析服务器日志（支持多级别：info/debug/warn等）
+# ===================================================
+def parse_server_log(log_path: str) -> dict:
+    """
+    提取日志中的时间戳、日志级别、动作和 seqno
+    日志格式示例：[2025-07-21 01:30:39.755119] [info] finish decode 11
+    """
+    # 正则匹配：时间戳、日志级别、动作、seqno [1,7](@ref)
+    log_pattern = re.compile(
+        r'\[(?P<date>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+)\]'
+        r' \[(?P<level>\w+)\]'
+        r' finish (?P<action>\w+) (?P<seqno>\d+)'
+    )
     
-    with open(file_path, 'r') as f:
+    action_data = {}
+    with open(log_path) as f:
         for line in f:
-            match = re.match(pattern, line)
+            match = log_pattern.search(line)
             if match:
-                timestamp, log_level, func_name, cost_us = match.groups()
-                if int(cost_us) > 0:  # 只记录耗时大于0的函数
-                    function_times[func_name].append(int(cost_us))
-    
-    return function_times
+                # 转换时间戳到微秒整数
+                log_time = datetime.strptime(
+                    match.group('date'), 
+                    '%Y-%m-%d %H:%M:%S.%f'
+                )
+                timestamp = int(log_time.timestamp() * 1e6)
+                seqno = int(match.group('seqno'))
+                action = match.group('action')
+                level = match.group('level')  # 提取日志级别
+                
+                # 按 seqno 和动作存储 [5](@ref)
+                if seqno not in action_data:
+                    action_data[seqno] = {}
+                action_data[seqno][action] = {
+                    'timestamp': timestamp,
+                    'level': level  # 保留日志级别
+                }
+    return action_data
 
-def calculate_statistics(function_times):
+# ===================================================
+# 3. 对齐数据并计算延迟
+# ===================================================
+def calculate_latencies(udp_data: dict, action_data: dict) -> dict:
     """
-    计算每个函数的统计指标
+    计算每个动作的延迟（微秒）
     """
-    stats = {}
-    for func, times in function_times.items():
-        if not times:
+    results = {}
+    
+    for seqno, packet_time in udp_data.items():
+        if seqno not in action_data:
             continue
             
-        arr = np.array(times)
-        stats[func] = {
-            "count": len(times),
-            "average": np.mean(arr),
-            "p95": np.percentile(arr, 95),
-            "p99": np.percentile(arr, 99),
-            "min": np.min(arr),
-            "max": np.max(arr),
-            "std_dev": np.std(arr)  # 标准差
+        for action, action_info in action_data[seqno].items():
+            # 只统计特定动作（如 decode/algo）
+            if action not in ['decode', 'algo']:  
+                continue
+                
+            latency = action_info['timestamp'] - packet_time
+            if action not in results:
+                results[action] = []
+            results[action].append({
+                'latency': latency,
+                'level': action_info['level']  # 关联日志级别
+            })
+    return results
+
+# ===================================================
+# 4. 统计延迟指标
+# ===================================================
+def generate_stats(latency_list: list) -> dict:
+    """
+    计算 min/max/mean/percentiles
+    """
+    arr = np.array([x['latency'] for x in latency_list])
+    return {
+        'min': np.min(arr),
+        'max': np.max(arr),
+        'mean': np.mean(arr),
+        '50%': np.percentile(arr, 50),
+        '90%': np.percentile(arr, 90),
+        '99%': np.percentile(arr, 99),
+        'samples': len(arr)  # 样本数量
+    }
+
+# ===================================================
+# 5. 主函数 & 命令行接口
+# ===================================================
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--pcap', required=True, help='tcpdump抓包文件路径')
+    parser.add_argument('--log', required=True, help='服务器日志文件路径')
+    parser.add_argument('--output', default='stats.json', help='统计结果输出路径')
+    args = parser.parse_args()
+
+    # 解析数据源
+    udp_data = parse_pcap(args.pcap)
+    action_data = parse_server_log(args.log)
+    
+    # 计算延迟
+    latencies = calculate_latencies(udp_data, action_data)
+    
+    # 生成统计结果
+    stats = {}
+    for action, data in latencies.items():
+        stats[action] = generate_stats(data)
+        stats[action]['level_samples'] = {
+            level: sum(1 for x in data if x['level'] == level)
+            for level in set(x['level'] for x in data)
         }
-    return stats
-
-def print_statistics(stats):
-    """
-    格式化输出统计结果
-    """
-    print("{:<30} {:<8} {:<10} {:<10} {:<10} {:<10} {:<10} {:<10}".format(
-        "Function", "Count", "Avg(us)", "P95(us)", "P99(us)", "Min(us)", "Max(us)", "StdDev"
-    ))
-    print("-" * 100)
-    for func, data in stats.items():
-        print("{:<30} {:<8} {:<10.2f} {:<10.2f} {:<10.2f} {:<10} {:<10} {:<10.2f}".format(
-            func, 
-            data["count"],
-            data["average"],
-            data["p95"],
-            data["p99"],
-            int(data["min"]),
-            int(data["max"]),
-            data["std_dev"]
-        ))
-
-if __name__ == "__main__":
-    file_path = "log/muduo.log"  # 替换为你的日志文件路径
-    function_times = parse_spdlog_file(file_path)
     
-    if not function_times:
-        print("未找到符合格式的日志记录")
-        exit(0)
-        
-    stats = calculate_statistics(function_times)
-    print_statistics(stats)
+    # 保存结果
+    with open(args.output, 'w') as f:
+        json.dump(stats, f, indent=2)
     
+    print(f"分析完成！结果已保存至: {args.output}")
+
+if __name__ == '__main__':
+    main()
