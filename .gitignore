@@ -4,3 +4,6 @@ install/
 html/
 .vscode/
 *log*
+*out
+.vscode/
+*json
