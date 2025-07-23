@@ -86,6 +86,7 @@
         "climits": "cpp",
         "queue": "cpp",
         "stack": "cpp",
-        "version": "cpp"
+        "version": "cpp",
+        "any": "cpp"
     }
 }
