@@ -10,3 +10,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_subdirectory(src)
 
 # add_subdirectory(third_party/snappy)
+
+option(BUILD_TESTS "Build tests" OFF)  # 默认不构建测试
+
+# 添加测试（仅当BUILD_TESTS=ON时）
+if(BUILD_TESTS)
+    add_subdirectory(tests)
+endif()
